@@ -1644,6 +1644,14 @@ body.pit-xl .rt th{ font-size:var(--fs-pit) !important; }
               <span class="s-lbl" id="s-title">Livestream</span>
               <!--<div class="s-live"><div class="s-ldot"></div>LIVE</div>-->
               <select id="s-sel" onchange="switchStream(this.value)" style="display:none;background:var(--surface2);border:2px solid var(--border2);color:var(--text-dim);font-family:var(--fm);font-size:var(--fs-sm);padding:2px 6px;border-radius:4px;cursor:pointer;outline:none"></select>
+              <button class="s-btn" id="s-custom-btn" onclick="toggleCustomStream()" title="Override the auto-detected stream with a YouTube or Twitch link">🔗 Link</button>
+              <span id="s-custom-row" style="display:none;align-items:center;gap:6px">
+                <input id="s-custom-in" type="text" placeholder="Paste YouTube or Twitch link" spellcheck="false" autocomplete="off"
+                  onkeydown="if(event.key==='Enter')applyCustomStream();else if(event.key==='Escape')toggleCustomStream()"
+                  style="width:min(260px,40vw);background:var(--surface2);border:2px solid var(--border2);color:var(--text);font-family:var(--fm);font-size:var(--fs-sm);padding:2px 6px;border-radius:4px;outline:none">
+                <button class="s-btn" onclick="applyCustomStream()">Go</button>
+              </span>
+              <span id="s-custom-err" style="display:none;font-family:var(--fd);font-size:var(--fs-sm);font-weight:700;color:var(--red)"></span>
             </div>
             <button class="s-btn" id="stream-hide-btn" style="display:none"></button>
           </div>
@@ -3054,6 +3062,7 @@ async function fMyAdv(){ sbMyAdv=await getAdvancement(C.team); }
 async function init(){
   document.getElementById('hdr-team').textContent='#'+C.team;
   resetPitMap();
+  loadCustomStream();
   // Listen on both candidates — which one scrolls flips with the layout
   // (see mlPanel()), and only the real scroller ever fires.
   ['panel-m','ml'].forEach(id=>
@@ -4222,6 +4231,16 @@ async function rStream() {
   const nowc = document.getElementById('s-nowc');
   const ti   = document.getElementById('s-title');
 
+  // Manual override beats TBA's webcast list entirely (and works even if TBA has none)
+  if (stCustom) {
+    if (stHidden) { half.style.display = 'none'; return; }
+    emb.style.display = 'block';
+    nowc.style.display = 'none';
+    document.getElementById('s-sel').style.display = 'none';
+    if (!stReplayMode) loadCustom();
+    return;
+  }
+
   if (!tbaWc) return;
   if (stHidden) { half.style.display = 'none'; return; }
 
@@ -4266,12 +4285,12 @@ function loadEmbed(w){if(!w)return;const fr=document.getElementById('s-iframe'),
 // Restore live stream at current stIdx without re-probing
 function restoreLiveStream(){
   const all=webcastList();
-  if(!all.length) return;
-  const w=all[Math.min(stIdx,all.length-1)];
-  loadEmbed(w);
+  if(!stCustom && !all.length) return;
+  if(stCustom) loadCustom();
+  else loadEmbed(all[Math.min(stIdx,all.length-1)]);
   // Restore selector
   const sel=document.getElementById('s-sel');
-  if(sel) sel.value=stIdx;
+  if(sel && !stCustom) sel.value=stIdx;
   // Hide back-to-live button
   const backBtn=document.getElementById('back-to-live-btn');
   if(backBtn) backBtn.style.display='none';
@@ -4320,6 +4339,101 @@ function exitReplayMode(){
   stIdx=stPreReplay.idx||0;
   stIdxManual=stPreReplay.manual||false;
   restoreLiveStream();
+}
+
+// ── MANUAL STREAM OVERRIDE ───────────────────────────────────────────────────
+// Paste the URL you'd open in a browser (watch page, youtu.be, twitch.tv/name…);
+// it's converted to the {type, channel} shape loadEmbed() already understands.
+// Stored per event so it never leaks into the next event.
+const LS_STREAM = 'pitfusion_stream_override';
+let stCustom = null;   // null = auto, else {type:'youtube'|'twitch', channel}
+
+function parseStreamUrl(raw){
+  let s = String(raw||'').trim();
+  if(!s) return null;
+  if(!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  let u; try { u = new URL(s); } catch(e){ return null; }
+  const host  = u.hostname.toLowerCase().replace(/^(www|m|music|gaming)\./,'');
+  const parts = u.pathname.split('/').filter(Boolean);
+  const ytId  = id => /^[\w-]{11}$/.test(id||'') ? {type:'youtube', channel:id} : null;
+
+  if(host === 'youtu.be') return ytId(parts[0]);
+  if(host === 'youtube.com' || host === 'youtube-nocookie.com'){
+    let id = u.searchParams.get('v');                                   // /watch?v=ID
+    if(!id && ['live','embed','shorts','v'].includes(parts[0])) id = parts[1];  // /live/ID, /embed/ID…
+    return ytId(id);
+  }
+  if(host === 'twitch.tv' || host === 'player.twitch.tv'){
+    let ch = host === 'player.twitch.tv' ? u.searchParams.get('channel')
+           : parts[0] === 'popout'       ? parts[1]
+           : parts[0];
+    const reserved = ['videos','directory','downloads','jobs','p','settings','search','turbo','store'];
+    ch = (ch||'').toLowerCase();
+    return (/^\w{3,25}$/.test(ch) && !reserved.includes(ch)) ? {type:'twitch', channel:ch} : null;
+  }
+  return null;
+}
+
+function loadCustom(){
+  loadEmbed(stCustom);
+  document.getElementById('s-title').textContent += ' (custom)';
+}
+
+function loadCustomStream(){
+  stCustom = null;
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_STREAM) || 'null');
+    if(o && o.event === C.event && (o.type === 'youtube' || o.type === 'twitch') && /^[\w-]+$/.test(o.channel||''))
+      stCustom = { type:o.type, channel:o.channel };
+  } catch(e){}
+  syncCustomStreamUi();
+}
+
+function syncCustomStreamUi(){
+  const btn = document.getElementById('s-custom-btn');
+  if(btn){
+    btn.textContent = stCustom ? '↩ Auto' : '🔗 Link';
+    btn.title = stCustom ? 'Go back to the auto-detected stream'
+                         : 'Override the auto-detected stream with a YouTube or Twitch link';
+  }
+  const row = document.getElementById('s-custom-row'); if(row) row.style.display = 'none';
+  const err = document.getElementById('s-custom-err'); if(err) err.style.display = 'none';
+}
+
+function toggleCustomStream(){
+  if(stCustom){ clearCustomStream(); return; }
+  const row = document.getElementById('s-custom-row');
+  const inp = document.getElementById('s-custom-in');
+  document.getElementById('s-custom-err').style.display = 'none';
+  const show = row.style.display === 'none';
+  row.style.display = show ? 'inline-flex' : 'none';
+  if(show) inp.focus();
+}
+
+function applyCustomStream(){
+  const inp = document.getElementById('s-custom-in');
+  const err = document.getElementById('s-custom-err');
+  const w = parseStreamUrl(inp.value);
+  if(!w){
+    err.textContent = "Couldn’t read that link — paste the video/channel URL from the address bar.";
+    err.style.display = '';
+    return;
+  }
+  stCustom = w;
+  try { localStorage.setItem(LS_STREAM, JSON.stringify({event:C.event, type:w.type, channel:w.channel})); } catch(e){}
+  inp.value = '';
+  syncCustomStreamUi();
+  if(stReplayMode) exitReplayMode();            // restoreLiveStream() now loads the override
+  else if(stHidden) toggleStreamVisibility();   // un-hide; it restores the override too
+  else rStream();
+}
+
+function clearCustomStream(){
+  stCustom = null;
+  try { localStorage.removeItem(LS_STREAM); } catch(e){}
+  syncCustomStreamUi();
+  stIdxManual = false;                          // let live auto-detection run again
+  if(stReplayMode) exitReplayMode(); else rStream();
 }
 
 function switchStream(idx){stIdx=parseInt(idx);stIdxManual=true;const all=webcastList();if(all[stIdx])loadEmbed(all[stIdx]);}
